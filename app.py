@@ -5,17 +5,31 @@ import datetime
 import os
 import textwrap
 import io
+import requests
+import json
 
 # --- 1. Вэбийн ерөнхий тохиргоо ---
 st.set_page_config(page_title='"Аутизм Монгол-АНД" ТББ ганцаарчилсан сургалтын үнэлгээ', layout="wide")
 
-DB_FILE = "autism_evaluation_db.csv"
+# 🔗 Google Apps Script URL (Таны бэлтгэсэн линк)
+GSHEET_URL = "https://script.google.com/macros/s/AKfycbyHGCWVdAEtXEKsSsaA4DxduFye0cFXOpHKgS_vLMDymT6Pq2lzKyiYRsSqA2BE8pPxiA/exec"
 
-# Датабааз унших
-def load_db():
-    if os.path.exists(DB_FILE):
-        return pd.read_csv(DB_FILE)
-    return pd.DataFrame()
+# Google Sheet-ээс дата унших функц
+def load_db_from_gsheet():
+    if not GSHEET_URL:
+        return pd.DataFrame()
+    try:
+        res = requests.get(GSHEET_URL, params={'action': 'read'})
+        data = res.json()
+        if len(data) > 1:
+            df = pd.DataFrame(data[1:], columns=data[0])
+            return df
+        elif len(data) == 1:
+            return pd.DataFrame(columns=data[0])
+        return pd.DataFrame()
+    except Exception as e:
+        st.error(f"Дата харахад алдаа гарлаа: {e}")
+        return pd.DataFrame()
 
 # Excel файлаас асуулт ялгах ухаалаг функц
 @st.cache_data
@@ -48,7 +62,6 @@ def parse_excel_questions(file):
 st.title('🧩 "Аутизм Монгол-АНД" ТББ ганцаарчилсан сургалтын үнэлгээ')
 st.markdown("---")
 
-# Tab (Цэс) үүсгэх
 tab1, tab2 = st.tabs(["📝 Шинэ үнэлгээ хийх", "📅 Түүх харах (Календар)"])
 
 # ==========================================
@@ -76,7 +89,6 @@ with tab1:
             
             eval_scores = {}
             
-            # --- ФОРМЫН ХЭСЭГ ---
             with st.form("evaluation_form"):
                 for sub_cat, questions in parsed_data.items():
                     if not questions: continue
@@ -90,7 +102,6 @@ with tab1:
                 
                 submitted = st.form_submit_button("Үнэлгээг Хадгалах & Тайлан Харах", use_container_width=True)
             
-            # --- ФОРМООС ГАДНА ХЭСЭГ (Үр дүн харуулах ба татах) ---
             if submitted:
                 if not child_name.strip():
                     st.error("Алдаа: Хүүхдийн нэрийг заавал оруулна уу!")
@@ -137,7 +148,6 @@ with tab1:
                     
                     st.pyplot(fig)
                     
-                    # Зураг татах товч одоо асуудалгүй ажиллана
                     buf = io.BytesIO()
                     fig.savefig(buf, format="png", bbox_inches='tight')
                     buf.seek(0)
@@ -148,6 +158,7 @@ with tab1:
                         mime="image/png"
                     )
                     
+                    # Google Sheets рүү хадгалах дата бэлдэх
                     save_data = {
                         'Огноо': str(eval_date), 
                         'Хүүхдийн нэр': child_name,
@@ -156,31 +167,35 @@ with tab1:
                     for cat, perc in sub_category_percentages.items():
                         save_data[f"{cat} (%)"] = round(perc, 1)
                         
-                    df_save = pd.DataFrame([save_data])
-                    if not os.path.exists(DB_FILE):
-                        df_save.to_csv(DB_FILE, index=False, encoding='utf-8-sig')
-                    else:
-                        df_save.to_csv(DB_FILE, mode='a', header=False, index=False, encoding='utf-8-sig')
-                        
-                    st.success("Үнэлгээ амжилттай хадгалагдлаа!")
+                    # Google Sheets рүү ИЛГЭЭХ
+                    try:
+                        res = requests.get(GSHEET_URL, params={'action': 'write', 'data': json.dumps(save_data)})
+                        if res.status_code == 200:
+                            st.success("Үнэлгээ Google Sheets рүү насан туршдаа найдвартай хадгалагдлаа! 🟢")
+                        else:
+                            st.error("Google Sheets рүү хадгалахад алдаа гарлаа.")
+                    except Exception as e:
+                        st.error(f"Холболтын алдаа гарлаа: {e}")
 
 # ==========================================
 # TAB 2: ТҮҮХ ХАРАХ (КАЛЕНДАР)
 # ==========================================
 with tab2:
-    st.subheader("📅 Үнэлгээний түүх хайх")
+    st.subheader("📅 Үнэлгээний түүх хайх (Google Sheets-ээс)")
     search_date = st.date_input("Календариас өдөр сонгоно уу:")
     
-    df_history = load_db()
+    with st.spinner("Google Sheets-ээс дата уншиж байна..."):
+        df_history = load_db_from_gsheet()
     
-    if not df_history.empty:
-        df_history['Огноо'] = pd.to_datetime(df_history['Огноо']).dt.date
-        filtered_df = df_history[df_history['Огноо'] == search_date]
+    if not df_history.empty and 'Огноо' in df_history.columns:
+        df_history['Огноо_dt'] = pd.to_datetime(df_history['Огноо'], errors='coerce').dt.date
+        filtered_df = df_history[df_history['Огноо_dt'] == search_date]
         
         if not filtered_df.empty:
             st.write(f"**{search_date}** өдөр нийт **{len(filtered_df)}** хүүхдэд үнэлгээ хийсэн байна:")
-            st.dataframe(filtered_df, use_container_width=True)
+            display_df = filtered_df.drop(columns=['Огноо_dt'])
+            st.dataframe(display_df, use_container_width=True)
         else:
             st.info(f"{search_date} өдөр үнэлгээний бүртгэл байхгүй байна.")
     else:
-        st.warning("Одоогоор датабаазад ямар ч үнэлгээ хадгалагдаагүй байна.")
+        st.warning("Одоогоор Google Sheets дээр үнэлгээ хадгалагдаагүй байна.")
